@@ -18,4 +18,4 @@ COPY --chown=appuser . .
 USER appuser
 
 EXPOSE 7860
-CMD ["python", "app.py"]
+CMD ["python", "-m", "src.frontend.app"]
