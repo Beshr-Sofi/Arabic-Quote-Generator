@@ -28,3 +28,5 @@ ENV HF_HOME=/home/appuser/.cache/huggingface \
 RUN python -m src.modeling.pull_model
 
 EXPOSE 7860
+
+CMD ["python", "-m", "src.frontend.app"]
