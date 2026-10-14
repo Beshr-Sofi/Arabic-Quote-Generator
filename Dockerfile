@@ -17,5 +17,10 @@ RUN useradd -m appuser
 COPY --chown=appuser . .
 USER appuser
 
+RUN mkdir -p /home/appuser/.cache/huggingface/hub \
+    && chown -R appuser:appuser /home/appuser/.cache
+
+ENV HF_HOME=/home/appuser/.cache/huggingface
+ENV HF_HUB_CACHE=/home/appuser/.cache/huggingface/hub
+
 EXPOSE 7860
-CMD ["python", "-m", "src.frontend.app"]

@@ -7,6 +7,7 @@ services:
     environment:
       MODEL_PATH: Beshr-Sofi/quote-gpt2
     volumes:
-      - hf-cache:/home/appuser/.cache/huggingface
+      - hf_cache:/home/appuser/.cache/huggingface
+
 volumes:
-  hf-cache:
+  hf_cache:
