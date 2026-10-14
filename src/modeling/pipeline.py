@@ -11,10 +11,14 @@ from langchain_core.prompts import ChatPromptTemplate
 from pydantic import BaseModel, Field
 
 from src.modeling.generate import generate_quotes
+from src.modeling.pull_model import ensure_model
 
 load_dotenv()
 if not os.getenv("GOOGLE_API_KEY"):
     raise RuntimeError("GOOGLE_API_KEY is not set. Put it in .env or export it.")
+
+# Ensure the fine-tuned model is pulled and ready locally
+LOCAL_MODEL_PATH = ensure_model()
 
 cheap = init_chat_model(os.getenv("EXTRACT_LLM", "google_genai:gemini-flash-lite-latest"))
 strong = init_chat_model(os.getenv("WRITE_LLM", "google_genai:gemini-flash-latest"))
@@ -148,7 +152,7 @@ def run(statement: str) -> dict:
     if crisis:
         return {"crisis": True}  # show a supportive message and resources, not a generated quote
     for _ in range(2):  # one retry if the editor rejects every candidate
-        candidates = generate_quotes(themes, n=4)
+        candidates = generate_quotes(themes, n=4, model_path=LOCAL_MODEL_PATH)
         if not candidates:
             continue
         numbered = "\n".join(f"{i}. {q}" for i, q in enumerate(candidates))

@@ -8,17 +8,21 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 MODEL_PATH = os.getenv("MODEL_PATH", os.path.join(os.getcwd(), "models", "final"))
 
 
-@lru_cache(maxsize=1)
-def load_model():
+@lru_cache(maxsize=2)
+def load_model(model_path: str = None):
     """Load and cache the fine-tuned GPT-2 tokenizer and model on available device.
 
     Uses lru_cache to ensure model weights are loaded into memory/GPU only once.
 
+    Args:
+        model_path (str, optional): Path or Hugging Face repo of the model. Defaults to MODEL_PATH.
+
     Returns:
         tuple[AutoTokenizer, AutoModelForCausalLM, str]: The tokenizer, model in eval mode, and device ('cuda' or 'cpu').
     """
-    tok = AutoTokenizer.from_pretrained(MODEL_PATH)
-    model = AutoModelForCausalLM.from_pretrained(MODEL_PATH).eval()
+    path = model_path or MODEL_PATH
+    tok = AutoTokenizer.from_pretrained(path)
+    model = AutoModelForCausalLM.from_pretrained(path).eval()
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return tok, model.to(device), device
 
@@ -65,7 +69,7 @@ def clean(text: str, finished: bool) -> str:
     return text if 5 <= len(text.split()) <= 45 else ""
 
 
-def generate_quotes(themes: list[str], n: int = 4, oversample: int = 3) -> list[str]:
+def generate_quotes(themes: list[str], n: int = 4, oversample: int = 3, model_path: str = None) -> list[str]:
     """Generate diverse English quote candidates conditioned on theme tags.
 
     Encodes the prompt, samples (n * oversample) sequences using temperature, top-p,
@@ -77,11 +81,12 @@ def generate_quotes(themes: list[str], n: int = 4, oversample: int = 3) -> list[
         n (int, optional): Target number of unique quotes to return. Defaults to 4.
         oversample (int, optional): Multiplier for generating extra candidates to allow
             filtering of incomplete or duplicate quotes. Defaults to 3.
+        model_path (str, optional): Path or identifier of the model. Defaults to None.
 
     Returns:
         list[str]: Up to n cleaned, unique candidate quote strings.
     """
-    tok, model, device = load_model()
+    tok, model, device = load_model(model_path)
     inputs = tok(build_prompt(themes), return_tensors="pt").to(device)
     eos = tok.eos_token_id
     with torch.no_grad():

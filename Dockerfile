@@ -13,14 +13,18 @@ RUN pip install torch --index-url https://download.pytorch.org/whl/cpu
 COPY requirements.txt .
 RUN pip install -r requirements.txt
 
-RUN useradd -m appuser
+RUN useradd -m appuser \
+    && mkdir -p /home/appuser/.cache/huggingface \
+    && chown -R appuser:appuser /home/appuser
+
 COPY --chown=appuser . .
+
 USER appuser
 
-RUN mkdir -p /home/appuser/.cache/huggingface/hub \
-    && chown -R appuser:appuser /home/appuser/.cache
+ENV HF_HOME=/home/appuser/.cache/huggingface \
+    HF_HUB_CACHE=/home/appuser/.cache/huggingface/hub \
+    MODEL_PATH=models/final
 
-ENV HF_HOME=/home/appuser/.cache/huggingface
-ENV HF_HUB_CACHE=/home/appuser/.cache/huggingface/hub
+RUN python -m src.modeling.pull_model
 
 EXPOSE 7860
