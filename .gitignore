@@ -1,0 +1,12 @@
+.env
+env/
+venv/
+__pycache__/
+*.pyc
+data/
+data_en/
+models/
+results/
+*.parquet
+.ipynb_checkpoints/,
+.vscode/

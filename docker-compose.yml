@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    ports:
+      - "7860:7860"
+    env_file: .env
+    environment:
+      MODEL_PATH: Beshr-Sofi/quote-gpt2
+    volumes:
+      - hf-cache:/home/appuser/.cache/huggingface
+volumes:
+  hf-cache:

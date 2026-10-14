@@ -1,114 +1,162 @@
-# src/data/build_dataset.py
-"""
-Orchestrates the full day-1 pipeline: load -> normalize -> dedup ->
-tag normalize -> cluster -> theme mapping -> stratified split.
-Run as a script: python -m src.data.build_dataset
-"""
-import json
+import re
+import nltk
 import pandas as pd
+from pathlib import Path
 from sklearn.model_selection import train_test_split
-from src.data.download import build_merged_dataset
-from src.data.normalize import normalize_arabic
-from src.data.dedup import remove_exact_duplicates, remove_near_duplicates
-from src.data.tag_clustering import (
-    corrections,
-    fix_truncated_tags,
-    normalize_tags,
-    get_tag_frequencies,
-    cluster_tags,
-    build_tag_to_theme_map,
-    apply_theme_mapping,
-)
-from src.data.theme_taxonomy import CLUSTER_TO_THEME, MANUAL_OVERRIDES
+from src.data.normalize import normalize_quotes, normalize_tags, remove_quotes_containing_nonASCII, looks_english
 
-RAW_DIR = "data/raw"
-INTERIM_DIR = "data/interim"
-PROCESSED_DIR = "data/processed"
-N_CLUSTERS = 35
+
 SEED = 42
+INPUT_PATH = Path("data_en/raw/Quote_data.csv")
+OUTPUT_DIR = Path("data_en/processed")
 
+TRAIN_SIZE = 0.80
+VAL_SIZE = 0.10
+TEST_SIZE = 0.10
 
-def load_and_merge() -> pd.DataFrame:
-    return build_merged_dataset()
+MIN_WORDS = 4
+MAX_WORDS = 60
+MAX_TAGS = 3
 
+nltk.download('punkt')
+nltk.download('wordnet')
+nltk.download('omw-1.4')
 
-def normalize_step(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["text_normalized"] = df["text"].apply(normalize_arabic)
+lemmatizer = nltk.stem.WordNetLemmatizer()
+
+def load_step() -> pd.DataFrame:
+    """Load raw quote dataset from CSV file.
+
+    Checks if INPUT_PATH exists and loads the CSV into a pandas DataFrame.
+
+    Raises:
+        FileNotFoundError: If INPUT_PATH does not exist on disk.
+
+    Returns:
+        pd.DataFrame: Loaded raw dataset.
+    """
+    if not INPUT_PATH.exists():
+        raise FileNotFoundError(f"Dataset not found: {INPUT_PATH.resolve()}")
+
+    df = pd.read_csv(INPUT_PATH)
+
+    print(f"Loaded: {len(df):,} rows")
+
     return df
 
 
-def dedup_step(df: pd.DataFrame) -> pd.DataFrame:
-    df = remove_exact_duplicates(df, text_col="text_normalized")
-    df = remove_near_duplicates(df, text_col="text_normalized", threshold=0.8)
+def clean_step(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean, filter, and deduplicate quotes in the dataset.
+
+    Executes a multi-stage cleaning pipeline:
+    1. Normalizes quote strings (removes unwanted symbols, lowercases).
+    2. Collapses consecutive duplicate punctuation marks (e.g. '!!' -> '!').
+    3. Drops non-ASCII and null quotes via `remove_quotes_containing_nonASCII`.
+    4. Filters for quotes that look like valid English using `looks_english`.
+    5. Restricts quote length to [MIN_WORDS, MAX_WORDS] range.
+    6. Removes duplicate quotes to ensure distinct training samples.
+
+    Args:
+        df (pd.DataFrame): Raw DataFrame containing 'Quote' column.
+
+    Returns:
+        pd.DataFrame: Cleaned DataFrame with filtered quotes.
+    """
+    df = df.copy()
+
+    df['Quote'] = normalize_quotes(df['Quote'])
+
+    df['Quote'] = df['Quote'].apply(lambda x: re.sub(r'([.,!?~:/])\1+', r'\1', str(x)))
+
+    df = remove_quotes_containing_nonASCII(df)
+
+    df = df.loc[df['Quote'].apply(looks_english)]
+
+    df = df.loc[(df['Quote'].str.split().str.len() >= MIN_WORDS) & (df['Quote'].str.split().str.len() <= MAX_WORDS)]
+
+    df = df.drop_duplicates(subset="Quote",keep="first").reset_index(drop=True)
+
     return df
 
 
-def tag_and_theme_step(df: pd.DataFrame) -> pd.DataFrame:
-    df = df.copy()
-    df["tags"] = df["tags"].apply(normalize_tags)
-    df["tags"] = df["tags"].apply(lambda ts: fix_truncated_tags(ts, corrections))
+def normalize_tags_step(df: pd.DataFrame) -> pd.DataFrame:
+    """Clean and lemmatize quote tags, filtering out quotes with excessive tags.
 
-    tag_freq = get_tag_frequencies(df)
-    print(f"{len(tag_freq)} distinct normalized tags")
+    Normalizes the 'revised_tags' column using the WordNet lemmatizer and filters
+    out rows where the number of tags exceeds `MAX_TAGS` (3).
 
-    clustered = cluster_tags(tag_freq, n_clusters=N_CLUSTERS, min_freq=2)
-    tag_to_theme = build_tag_to_theme_map(clustered, CLUSTER_TO_THEME)
-    tagged = apply_theme_mapping(df, tag_to_theme, MANUAL_OVERRIDES)
+    Args:
+        df (pd.DataFrame): Cleaned DataFrame with 'revised_tags'.
 
-    with open(f"{PROCESSED_DIR}/theme_taxonomy.json", "w", encoding="utf-8") as f:
-        json.dump(
-            {"cluster_to_theme": CLUSTER_TO_THEME, "overrides": MANUAL_OVERRIDES},
-            f, ensure_ascii=False, indent=2,
-        )
-    tagged.to_parquet(f"{INTERIM_DIR}/tagged.parquet")
-    print(tagged["themes"].explode().value_counts())
-    return tagged
+    Returns:
+        pd.DataFrame: DataFrame with normalized tags limited to at most MAX_TAGS.
+    """
+    df['revised_tags'] = normalize_tags(df['revised_tags'],lemmatizer)
 
+    df = df.loc[df['revised_tags'].apply(lambda x: len(x) <= MAX_TAGS)]
 
-def split_step(df: pd.DataFrame, val_size: float = 0.1, test_size: float = 0.1):
-    df = df.copy()
-    df["strat_theme"] = df["themes"].apply(lambda ts: ts[0])
+    return df
 
-    def fold_rare(d: pd.DataFrame, min_count: int) -> pd.DataFrame:
-        counts = d["strat_theme"].value_counts()
-        rare = counts[counts < min_count].index
-        if len(rare) > 0:
-            print(f"Folding {len(rare)} rare theme(s) into 'أخرى': {list(rare)}")
-            d = d.copy()
-            d.loc[d["strat_theme"].isin(rare), "strat_theme"] = "أخرى"
-        return d
+def split_step(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Split dataset into train, validation, and test sets and persist to Parquet.
 
-    # stage 1: needs >=2 members per class overall; use a comfortable margin
-    df = fold_rare(df, min_count=10)
+    Uses a two-phase train_test_split:
+    - Train split: TRAIN_SIZE (80%).
+    - Validation split: VAL_SIZE (10%).
+    - Test split: TEST_SIZE (10%).
+    Saves 'train.parquet', 'validation.parquet', and 'test.parquet' to OUTPUT_DIR.
 
-    train_df, temp_df = train_test_split(
-        df, test_size=(val_size + test_size), random_state=SEED, stratify=df["strat_theme"]
-    )
+    Args:
+        df (pd.DataFrame): Fully preprocessed and cleaned DataFrame.
 
-    # stage 2: recheck on temp_df itself — a class fine at stage 1 can still
-    # collapse to 1 member here since temp_df is only ~20% of the data
-    temp_df = fold_rare(temp_df, min_count=2)
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: (train_df, val_df, test_df).
+    """
 
-    relative_test = test_size / (val_size + test_size)
-    val_df, test_df = train_test_split(
-        temp_df, test_size=relative_test, random_state=SEED, stratify=temp_df["strat_theme"]
-    )
+    df = df.reset_index(drop=True).copy()
 
-    for name, split in [("train", train_df), ("val", val_df), ("test", test_df)]:
-        print(f"{name}: {len(split)} rows")
-        split.drop(columns=["strat_theme"]).to_parquet(f"{PROCESSED_DIR}/{name}.parquet")
+    temporary_size = VAL_SIZE + TEST_SIZE
+
+    train_df, temp_df = train_test_split(df,test_size=temporary_size,random_state=SEED,shuffle=True)
+
+    relative_test_size = TEST_SIZE / temporary_size
+
+    val_df, test_df = train_test_split(temp_df,test_size=relative_test_size,random_state=SEED,shuffle=True)
+
+    train_df = train_df.reset_index(drop=True)
+    val_df = val_df.reset_index(drop=True)
+    test_df = test_df.reset_index(drop=True)
+
+    train_df.to_parquet(OUTPUT_DIR / "train.parquet",index=False)
+    val_df.to_parquet(OUTPUT_DIR / "validation.parquet",index=False)
+    test_df.to_parquet(OUTPUT_DIR / "test.parquet",index=False)
+
+    print("\nDataset split completed:")
+    print(f"Total:      {len(df):,}")
+    print(f"Train:      {len(train_df):,} ({len(train_df) / len(df):.1%})")
+    print(f"Validation: {len(val_df):,} ({len(val_df) / len(df):.1%})")
+    print(f"Test:       {len(test_df):,} ({len(test_df) / len(df):.1%})")
 
     return train_df, val_df, test_df
 
 
 def main():
-    merged = load_and_merge()
-    normalized = normalize_step(merged)
-    deduped = dedup_step(normalized)
-    tagged = tag_and_theme_step(deduped)
-    split_step(tagged)
-    print("Day 1 pipeline complete.")
+    """Execute the end-to-end data processing and splitting pipeline.
+
+    Orchestrates loading, cleaning, tag normalization, and dataset splitting.
+
+    Returns:
+        tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]: (train_df, val_df, test_df).
+    """
+    df = load_step()
+    df = clean_step(df)
+    df = normalize_tags_step(df)
+
+    train_df, val_df, test_df = split_step(df)
+    print("\nPipeline completed successfully.")
+    print(f"Output directory: {OUTPUT_DIR.resolve()}")
+
+    return train_df, val_df, test_df
 
 
 if __name__ == "__main__":
